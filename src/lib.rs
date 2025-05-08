@@ -56,12 +56,14 @@ struct Tables {
     gy: Vec<f64>,
 }
 
+// This implementation works in flattened 2D -> 1D array representation
 pub fn get_noise_map(perlin: Perlin) -> Vec<f64> {
     let width = perlin.size;
     let mut frequency = perlin.frequency;
     if perlin.seamless {
         // Tweak the frequency ever so slightly so that seamless looks properly seamless
         frequency = (1.0 / perlin.size as f64) * (perlin.frequency * perlin.size as f64).round();
+        // I don't believe I've ever seen anyone talk about this needing to be done before?
     }
     let mut map: Vec<f64> = vec![0f64; width * width];
     map.par_iter_mut().enumerate().for_each(|(i, m)| {
@@ -69,9 +71,10 @@ pub fn get_noise_map(perlin: Perlin) -> Vec<f64> {
         let x: usize = (i - y) / width;
         *m = get_noise2d(x as f64, y as f64, frequency, &perlin);
     });
+
+    // Normalize the map values before returning.
     let maxv = *map.par_iter().max_by(|x, y| x.total_cmp(y)).unwrap();
     let minv = *map.par_iter().min_by(|x, y| x.total_cmp(y)).unwrap();
-
     let denom = maxv - minv;
     map.par_iter_mut().for_each(|m| {
         *m = (*m - minv) / denom;
@@ -80,8 +83,9 @@ pub fn get_noise_map(perlin: Perlin) -> Vec<f64> {
 }
 
 fn get_noise2d(x: f64, y: f64, frequency: f64, perlin: &Perlin) -> f64 {
-    // Create the tables.
+    // Create permutation and gradient tables dynamically.
     let tables = generate_tables(perlin.seed, perlin.size);
+
     let mut f = frequency;
     let mut a = perlin.amplitude;
 
@@ -89,8 +93,11 @@ fn get_noise2d(x: f64, y: f64, frequency: f64, perlin: &Perlin) -> f64 {
     let mut dx = 0f64;
     let mut dy = 0f64;
 
+    // Basic Fractal Brownian Motion process.
     for _ in 0..perlin.octaves {
+        // Period is used for seamless noise.
         let period: usize = (perlin.size as f64 * f).floor() as usize;
+
         let noise = noise2d(
             f * x,
             f * y,
@@ -101,6 +108,8 @@ fn get_noise2d(x: f64, y: f64, frequency: f64, perlin: &Perlin) -> f64 {
             perlin.erosion,
         );
         let mut r1 = noise[0];
+
+        // This is based on some of Inigo Quilez' articles I think.
         if perlin.domain_warping {
             let mut tnoise = noise2d(
                 (x + perlin.warp_size) * f,
@@ -124,6 +133,8 @@ fn get_noise2d(x: f64, y: f64, frequency: f64, perlin: &Perlin) -> f64 {
             r1 = tnoise[0];
         }
         r1 = a * r1;
+
+        // Also based on Inigo Quilez work.
         if perlin.erosion {
             dx += noise[1];
             dy += noise[2];
@@ -169,11 +180,13 @@ fn noise2d(
     let v: f64 = fy0 * fy0 * fy0 * (fy0 * (fy0 * 6f64 - 15f64) + 10f64);
     let uv: f64 = u * v;
 
+    // Use two permutation tables instead of a nested lookup on one.
     let h00: usize = (tables.px[x0 as usize] ^ tables.py[y0 as usize]) as usize;
     let h10: usize = (tables.px[x1 as usize] ^ tables.py[y0 as usize]) as usize;
     let h01: usize = (tables.px[x0 as usize] ^ tables.py[y1 as usize]) as usize;
     let h11: usize = (tables.px[x1 as usize] ^ tables.py[y1 as usize]) as usize;
 
+    // Same for gradient tables.
     let a: f64 = tables.gx[h00] as f64 * fx0 + tables.gy[h00] as f64 * fy0;
     let b: f64 = tables.gx[h10] as f64 * fx1 + tables.gy[h10] as f64 * fy0;
     let c: f64 = tables.gx[h01] as f64 * fx0 + tables.gy[h01] as f64 * fy1;
@@ -201,6 +214,13 @@ fn noise2d(
     return out;
 }
 
+/*
+    This set generates dual gradient tables, and dual permutation tables.
+    It's based on the first of three improvements found in
+    a technical report by Andrew Kensler et al called "Better Gradient Noise"
+    At the moment it can be found here. https://sci.utah.edu/publications/SCITechReports/UUSCI-2008-001.pdf
+    End result is an increase in required memory, with a reduction in complexity. 2^(n+1)-2 -> 2N lookups.
+*/
 fn generate_tables(seed: usize, size: usize) -> Tables {
     let mut rng = ChaCha8Rng::seed_from_u64(seed as u64);
     let mut tables: Tables = Tables {
